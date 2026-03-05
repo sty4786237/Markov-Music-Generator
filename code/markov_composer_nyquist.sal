@@ -1,0 +1,286 @@
+;; ==========================================================
+;; MARKOV COMPOSER: GAUSSIAN ATTRACTION FIELD & EVALUATION
+;; ==========================================================
+
+;; ----------------------------------------------------------
+;; 0. PROCEDURAL GENERATION SEED
+;; ----------------------------------------------------------
+set my_seed = 68193718
+exec random-seed(my_seed)
+
+print ">>> INITIALIZING ENGINE WITH SEED:"
+print my_seed
+
+;; ----------------------------------------------------------
+;; GLOBAL CONTROL PARAMETERS
+;; ----------------------------------------------------------
+set MOTION_VARIANCE = 5.0
+set HARMONY_VARIANCE = 8.0
+
+;; ----------------------------------------------------------
+;; STORAGE FOR EVALUATION
+;; ----------------------------------------------------------
+set pitch_history = nil
+
+;; ----------------------------------------------------------
+;; 1. TRAINING PHASE (MARKOV CHAINS)
+;; ----------------------------------------------------------
+
+set rhythm_rules = markov-create-rules(
+  {q i i q q i i h q i q i h q i i i i q q i h q i i q}, 2, t)
+
+set rhythm_pat = make-markov(rhythm_rules, past: {q q}, produces: :eval)
+
+set contour_rules = markov-create-rules(
+  {up same down up up down same down up up same down
+   down same up up same up same down}, 1, t)
+
+set contour_pat = make-markov(contour_rules, past: {up})
+
+;; ----------------------------------------------------------
+;; 2. HARMONIC SKELETON
+;; ----------------------------------------------------------
+
+set chord_markov_rules = markov-create-rules(
+  {0 1 2 3 0 2 1 3 0 1 4 3 0 2 4 3 0 5 2 3
+   0 1 2 6 3 0 2 7 3 0 1 2 3 0 4 2 3 0 5 1
+   3 0 2 4 6 3 0 1 7 3 0 2 1 3 0 4 1 3 0 2 5 3}, 3, t)
+
+set chord_pat = make-markov(chord_markov_rules, past: {0 1 2})
+
+;; Define the chord palette for lookup
+set chord_palette = {
+  {0 4 7} 
+  {9 0 4} 
+  {5 9 0} 
+  {7 11 2} 
+  {2 5 9} 
+  {4 7 11} 
+  {7 11 2 5} 
+  {11 2 5}
+}
+
+set current_pitch = 60
+
+;; ----------------------------------------------------------
+;; 3. GAUSSIAN PITCH ENGINE
+;; ----------------------------------------------------------
+
+function weighted_pitch_choice(p, chord_pcs)
+  begin
+    with candidates = list(p - 4, p - 3, p - 2, p - 1, p, p + 1, p + 2, p + 3, p + 4),
+         weights = nil,
+         total_w = 0.0,
+         running = 0.0,
+         interval = 0,
+         motion_w = 0.0,
+         harmony_w = 0.0,
+         pc = 0,
+         nearest = 12,
+         d = 0,
+         w = 0.0,
+         r_val = 0.0
+
+    loop
+      for c in candidates
+      set interval = abs(c - p)
+      set motion_w = exp(0.0 - ((interval * interval) / MOTION_VARIANCE))
+      
+      set pc = c % 12
+      set nearest = 12
+      
+      loop
+        for cp in chord_pcs
+        set d = abs(pc - cp)
+        if d > 6 then set d = 12 - d
+        if d < nearest then set nearest = d
+      end
+      
+      set harmony_w = exp(0.0 - ((nearest * nearest) / HARMONY_VARIANCE))
+      set w = motion_w * harmony_w
+      
+      set weights = append(weights, list(w))
+      set total_w = total_w + w
+    end
+      
+    set r_val = (random(10000) / 10000.0) * total_w
+    
+    loop
+      for this_w in weights
+      for this_c in candidates
+      set running = running + this_w
+      if running >= r_val then return this_c
+    end
+      
+    return p
+  end
+
+
+function get_next_pitch()
+  begin
+    with contour = next(contour_pat),
+         chord_idx = next(chord_pat),
+         chord = nth(chord_idx, chord_palette),
+         target = current_pitch
+         
+    if contour = quote(up) then set target = current_pitch + 3
+    else if contour = quote(down) then set target = current_pitch - 3
+    
+    set current_pitch = weighted_pitch_choice(target, chord)
+    
+    if current_pitch > 84 then set current_pitch = 72
+    if current_pitch < 48 then set current_pitch = 60
+    
+    set pitch_history = append(pitch_history, list(current_pitch))
+    
+    return current_pitch
+  end
+
+;; ----------------------------------------------------------
+;; 4. GENERATION
+;; ----------------------------------------------------------
+
+print "Generating sequence..."
+begin
+  exec score-gen(
+    save: quote(markov_song),
+    score-len: 256,
+    pitch: get_next_pitch(),
+    ioi: 0.5 * next(rhythm_pat),
+    vel: 100)
+end
+
+exec score-write-smf(markov_song, "gaussian_composer.mid")
+print "Success! saved gaussian_composer.mid."
+
+;; ==========================================================
+;;                EVALUATION METRICS
+;; ==========================================================
+
+;; ----------------------------------------------------------
+;; Pitch Entropy (Shannon Entropy)
+;; ----------------------------------------------------------
+function pitch_entropy(pitches)
+  begin
+    with counts = make-array(128),
+         total = 0,
+         entropy = 0.0,
+         prob = 0.0
+         
+    loop 
+      for i from 0 below 128 
+      set counts[i] = 0 
+    end
+    
+    loop
+      for p in pitches
+      set counts[p] = counts[p] + 1
+      set total = total + 1
+    end
+      
+    loop
+      for i from 0 below 128
+      if counts[i] > 0 then
+        begin
+          set prob = float(counts[i]) / total
+          set entropy = entropy - (prob * log(prob))
+        end
+    end
+      
+    return entropy
+  end
+
+;; ----------------------------------------------------------
+;; N-gram repetition (SAFELY REWRITTEN)
+;; ----------------------------------------------------------
+function ngram_rate(pitches, n)
+  begin
+    with seen = nil,
+         repeated = 0,
+         total = 0,
+         gram = nil,
+         limit = length(pitches) - n,
+         p = 0
+         
+    loop
+      for i from 0 below limit
+      
+      ;; Manually build the n-gram using a sliding window
+      set gram = nil
+      loop
+        for j from 0 below n
+        set p = nth(i + j, pitches)
+        set gram = append(gram, list(p))
+      end
+      
+      ;; Check if we have seen this specific gram before
+      if member(gram, seen, test: quote(equal)) then
+        set repeated = repeated + 1
+      else
+        set seen = append(seen, list(gram))
+        
+      set total = total + 1
+    end
+      
+    if total = 0 then return 0.0
+    return float(repeated) / total
+  end
+
+;; ----------------------------------------------------------
+;; Self Similarity Matrix (File I/O Version)
+;; ----------------------------------------------------------
+function similarity_matrix(pitches)
+  begin
+    with N_len = length(pitches),
+         dist = 0,
+         p_i = 0,
+         p_j = 0,
+         ;; Open file for writing
+         fp = open("matrix.csv", direction: :output)
+         
+    if fp then
+      begin
+        print "Writing Self-Similarity Matrix to matrix.csv..."
+        loop
+          for i from 0 below N_len
+          set p_i = nth(i, pitches)
+          
+          loop
+            for j from 0 below N_len
+            set p_j = nth(j, pitches)
+            set dist = abs(p_i - p_j)
+            ;; Write distance followed by a comma
+            exec format(fp, "~A,", dist)
+          end
+          
+          ;; Write a newline at the end of each row
+          exec format(fp, "~%")
+        end
+        exec close(fp)
+        print "Success! Matrix saved to matrix.csv"
+      end
+    else
+      print "Error: Could not open file for writing."
+  end
+
+;; ----------------------------------------------------------
+;; RUN EVALUATION
+;; ----------------------------------------------------------
+
+print "----- EVALUATION -----"
+
+set H = pitch_entropy(pitch_history)
+print "Pitch Entropy (Nats):"
+print H
+
+set R = ngram_rate(pitch_history, 3)
+print "3-gram repetition rate:"
+print R
+
+exec similarity_matrix(pitch_history)
+
+;; ----------------------------------------------------------
+;; PLAY
+;; ----------------------------------------------------------
+
+exec score-play(markov_song)
